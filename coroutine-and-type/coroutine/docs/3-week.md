@@ -438,3 +438,274 @@ fun <T> flow(
 
 ## 플로우와 공유 상태
 - 플로우 처리를 통해 좀더 복잡한 알고리즘을 구현할 때는 언제 변수에 대한 접근을 동기화해야 하는지 알아야 한다.
+
+# 21 플로우 만들기
+
+- 플로우는 어디선가 시작되어야 한다.
+## 원시값을 가지는 플로우
+- flowOf 함수를 사용하는 방법
+```
+suspend fun main() {
+	flowOf(1, 2, 3, 4, 5).collect { print(it) } //12345
+}
+```
+- 값이 없는 플로우
+- emptyFlow() 를 사용한다.
+```
+emptyFlow<Int>().collect { print(it) } //(아무것도 출력되지 않음)
+```
+## 컨버터
+- asFlow 함수를 사용하여, Iterable, Iterator, Sequence 를 Flow 로 바꿀 수도 있다.
+- 즉시 사용 가능한 원소들의 플로우를 만든다.
+```
+suspend fun main() {
+	listOf(1,2,3,4,5) // setOf or sequenceOf 도 가능
+	.asFlow()
+	.collect { print(it) } //12345
+}
+```
+## 함수를 플로우로 바꾸기
+- 플로우는 시간상 지연되는 하나의 값을 나타낼 때 자주 사용된다.
+- 따라서 중단 함수를 플로우로 변환하는 것 또한 가능하다.
+- 이 때 중단 함수의 결과가 플로우의 유일한 값이 된다.
+- (suspend() -> T) 혹은 (() -> T) 같은 함수의 확장 함수인 asFlow 를 사용할 수 있다.
+```
+suspend fun getUserName(): String {
+	delay(1000)
+	return "UserName"
+}
+suspend fun main() {
+	val function = suspend {
+		delay(1000)
+		"UserName"
+	}
+	function.asFlow().collect { println(it) }
+	::getUserName
+	.asFlow().collect { println(it) }
+}
+
+```
+## 플로우와 리액티브 스트림
+- 애플리케이션에서 Reactive 스트림을 사용하고 있다면 코드를 별로 바꾸지 않고 플로우를 적용할 수 있다.
+- Flux, Flowable, Observable 은 kotlinx-coroutines-reactive 라이브러리의 asFlow 함수를 사용해 Flow 로 변환 가능한 Publisher 인터페이스를 구현한다.
+```
+suspend fun main() = coroutineScope {
+	Flux.range(1, 5).asFlow().collect { print(it) } //12345
+	Flowable.range(1, 5).asFlow().collect { print(it) }//12345
+	Observable.range(1, 5).asFlow().collect { print(it) }//12345
+}
+```
+- 역으로 Flow 를 반대로 바꿀 수도 있다.
+	-	flow.asFlux()
+	-	flow.asflowable()
+	-	flow.asObservable
+-	kotlinx-coroutines-rx3(kotlinx-coroutines-rx2) 라이브러리가 필요하다.
+## 플로우 빌더
+- 가장 많이 사용되는 방법
+- flow 필더를 사용하는 것으로 sequence, produce 빌더와 비슷하게 작동한다.
+- Channel 이나 Flow 에서 모든 값을 방출하려면 emitAll 을 사용할 수 있다.
+```
+flow {
+	repeat(3) {
+		num -> delay(1000); emit(num)
+	}
+}
+```
+
+## 플로우 빌더 이해하기
+- 플로우 빌더는 플로우를 만드는 가장 기본적인 방법이다.
+```
+public fun <T> flowOf(vararg elements: T): Flow<T> = flow {
+	for (element in elements) {
+		emit(element)
+	}
+}
+```
+이는 이전 장에서 살펴본 내용과 같은 원리이다.
+## 채널 플로우
+- Flow 는 콜드 데이터 스트림이다.
+- 따라서 요청을 한 경우에 한해 데이터를 제공한다.
+- 그러나 원소를 처리하고 있을 때 미리 다음 데이터를 받아오고 싶을 때가 있다.
+- 이는 핫 데이터 스트림의 특징이다.
+	- 채널과 플로우를 합친 형태인 channelFlow 함수를 이용할 수 있다.
+- 이는 채널이지만 Flow 인터페이스를 구현하므로 플로우가 가지는 특징을 제공한다.
+- 채널플로우 빌더는 일반 함수이며 최종 연산으로 시작된다.
+- 한 번 시작되기만 하면 리시버를 기다릴 필요 없이 분리된 코루틴에서 값을 생성한다는 점이 채널과 비슷하다.
+```
+channelFlow {
+	send(3)
+	send(4)
+}
+```
+- channelFlow 는 ProducerScope 에서 작동한다.
+- ProducerScope 는 produce 빌더가 사용하는 것과 같은 타입이다.
+- CoroutineScope 를 구현했기 때문에 빌더에서 새로운 코루틴을 시작할 때 사용할 수 있다.
+```
+interface ProducerScope<in E>: CoroutineScope, SendChannel<E> {
+	val channel: SendChannel<E>
+}
+```
+- send 로 데이터를 전송한다.
+- 내부 sendChannel 에 접근해서 직접 메서드를 다룰 수도 있다.
+- 내부에서 launch 같은 코루틴 빌더를 직접 시작할 수 있다.
+	- 이는 flow 는 하지 못하는 기능이다(코루틴 빌더가 필요로 하는 스코프를 만들지 못하기 때문).?
+```
+fun <T> Flow<T>.merge(other: Flow<T>): Flow<T> = 
+	channelFlow {
+		launch(Dispatchers.IO) {
+			collect { send(it) }
+		}
+		other.collect { send(it) }
+	}
+
+```
+## 콜백플로우
+- 이벤트 반응형 플로우가 필요할 경우 사용할 수 있다.
+- callbackFlow 를 이용하는 방법이다.
+- ProducerScope<T> 에서 작동한다.
+- 이전에는 channelFlow 와 크게 다른 점이 없었다.
+- 유용한 몇가지 함수를 제공한다.
+	- awaitClose { ... }
+		- 채널이 닫힐 때까지 중단되는 함수이다.
+		- 채널이 닫힌 다음에 인자로 들어온 함수가 실행된다.
+		- 이 호출이 없으면 콜백 등록 후 코루틴은 곧바로 끝나게 된다.
+			- callbackFlow 빌더의 실행이 끝나고 기다릴 자식 코루틴이 없으면 코루틴은 종료되기 때문이다.
+	- trySendBlocking(value)
+		- send 와 비슷하지만 중단하는 대신 블로킹하여 중단 함수가 아닌 함수에서도 사용할 수 있다.
+	- close()
+		- 채널을 닫는다
+	- cancel(throwable)
+		- 채널을 종료하고 플로우에 예외를 던진다
+
+```
+fun flowFrom(api: CallbackBasedApi): Flow<T> = callbackFlow {
+	val callback = object: Callback {
+		override fun onNextValue(value: T) {
+			trySendBlocking(value)
+		}
+		override fun onApiError(cause: Throwable) {
+			cancel(CancellatitonException("API ERROR", cause))
+		}
+		override fun onCompleted() = channel.close()
+	}
+	api.register(callback)
+	awaitClose { api.unregister(callback) }
+}
+```
+# 22 플로우 생성주기 함수
+- 플로우는 요청이 한쪽 방향으로 흐르고 요청에 의해 성성된 값이 다른 방향으로 흐르는 파이프다.
+- 모든 정보가 플로우를 통해 전달되므로, 시작 완료와 같은 다른 특정 이벤트를 감지할 수 있다.
+- onEach, onStart, onCompletion, onEmpty 그리고 catch 같은 메서드를 사용하면 된다.
+## onEach
+-	플로우의 값을 하나씩 받기 위해 사용한다.
+```
+suspend fun main() {
+	flowOf(1,2,3)
+	.onEach { print(it) }
+	.collect() //123
+}
+```
+- 중단함수다.
+- 원소는 순서대로 처리된다.
+- 이곳에 delay 를 넣으면 각각의 값이 흐를 때마다 지연이 발생한다.
+## onStart
+- 최종 연산이 호출될 때와 같이 플로우가 시작되는 경우에 호출되는 리스너를 설정하는 함수이다.
+- 첫번째 원소가 생성되는 걸 기다렸다가 호출되는 게 아니다.
+- 첫 번째 원소를 요청했을 때 호출된다.
+```
+suspend fun main() {
+	flowOf(1, 2)
+	.onEach { delay(1000) }
+	.onStart { println("before"); emit(0) }
+	.collect { println(it) } 
+	//Before
+	//0
+	//1 second later
+	//1
+	//1 second later
+	//2
+}
+```
+- 이 내부에서도 원소를 내보낼 수 있다.
+	- onCompletion, onEmpty, catch 도 동일하다.
+	- 원소들은 onStart 부터 아래로 흐른다.
+## onCompletion
+- 플로우를 완료할 수 있는 여러 방법이 있다.
+	- 잡히지 않은 예외가 발생하는 경우
+	- 코루틴이 취소되는 경우
+	- 플로우 빌더가 끝나는 경우
+		- 마지막 원소가 전송되었을 때
+- 이 순간에 즉 플로우가 완료되었을 때 호출되는 리스너를 추가할 수 있다.
+```
+flowOf(1,2)
+	.onEach { delay(1000) }
+	.onCompletion { println("Completed") }
+	.collect { println(it) }
+// 1 sec later
+//1
+// 1 sec later
+//2
+// Completed
+```
+## onEmpty
+- 플로우는 예기치 않은 이벤트가 발생하면 값을 내보니기 전에 완료될 수 있다.
+- 이 함수는 원소를 내보내기 전에 플로우가 안료되면 실행된다.
+- 기본값을 내보니기 위한 목적으로 사용될 수 있다.
+```
+flow<List<Int>> { delay(1000) }
+.onEmpty { empt(emptyList()) }
+.collect { println(it) }
+//1 sec later
+//[]
+```
+## catch
+- 플로우를 만들거나 처리하는 도중에 예외가 발생할 수 있다.
+- 예외는 아래로 흐르면서 처리하는 단계를 하나씩 닫는다.
+- 예외를 잡고 관리할 수도 있다.
+- catch 가 이 용도로 이용된다.
+	- 리스너는 예외를 인자로 받고 정리를 위한 연산을 수행할 수 있다.
+```
+val flow = flow {
+	emit(1)
+	emit(2)
+	throw Error()
+}
+
+suspend fun main(): Unit {
+	flow.onEach { println("Got $it") }
+		.catch { println("Caught $it") }
+		.collect { println("Collected $it") }
+}
+//Got 1
+//Collected 1
+//Got 2
+//Colelcted 2
+//Caught Error
+```
+- onEach 는 예외에 반응하지 않는다.
+- catch 는 예외를 잡아 전파되는 걸 멈춘다.
+- 이전 단계는 이미 완료된 상태지만, catch 는 새로운 값을 여전히 내보낼 수 있어 남은 플로우를 지속할 수 있다.
+- catch 윗부분에서 던진 예외에만 반응한다.
+## 잡히지 않은 예외
+- 플로우에서 잡히지 않은 예외는 플로우를 즉시 취소하며, collect 는 예외를 다시 던진다.
+- 중단 함수가 예외를 처리하는 방식과 같다.
+- 플로우 밖에서 전통적인 try-catch 를 사용해서 예외를 잡을 수도 있다.
+- catch 는 최종 연산에서 발생한 예외를 처리하는 데 도움이 되지 않는다.
+- 따라서 collect 의 로직을 onEach 로 옮기고 catch 를 그 뒤로 이동시키는 방법을 주로 사용하기도 한다.
+## flowOn
+- (onEach, onStart, onCompletion 과 같은) 플로우 연산과 (flow or channelFlow 와 같은) 플로우 빌더의 인자로 사용되는 람다식은 모두 중단 함수다.
+- 중단 함수이므로 컨텍스트가 필요하다.
+- 이 컨텍스트는 어디서 얻어오는가 하면 collect 가 호출되는 곳의 컨텍스트이다.
+- flowOn 을 사용해서 컨텍스트를 변경할 수도 있다.
+- 윗부분에 있는 함수에서만 작동한다.
+## launchIn
+-	유일한 인자로 스코프를 받는다. collect 를 새로운 코루틴에서 시작할 수 있다
+```
+fun <T> Flow<T>.launchIn(scope: CoroutineScope): Job = scope.launch { collect() }
+suspend fun main(): Unit = coroutineScope {
+	flowOf("User1", "User2")
+		.onStart { println("Users:") }
+		.onEach { println(it) }
+		.launchIn(this)
+}
+```
